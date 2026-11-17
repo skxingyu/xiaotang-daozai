@@ -161,27 +161,30 @@ impl IslandShape {
     }
 }
 
-/// 岛体停靠的屏幕边缘：顶部为横向刘海 / 胶囊，左右两侧为竖向排列。
+/// 岛体停靠的屏幕边缘：顶部为横向刘海 / 胶囊，左右两侧为竖向排列，
+/// 底部贴在任务栏条内（没有任务栏时贴桌面底边），面板向上展开。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Dock {
     #[default]
     Top,
     Left,
     Right,
+    Bottom,
 }
 
 impl Dock {
-    pub const ALL: [Dock; 3] = [Dock::Top, Dock::Left, Dock::Right];
+    pub const ALL: [Dock; 4] = [Dock::Top, Dock::Left, Dock::Right, Dock::Bottom];
     pub fn key(self) -> &'static str {
-        match self { Self::Top => "top", Self::Left => "left", Self::Right => "right" }
+        match self { Self::Top => "top", Self::Left => "left", Self::Right => "right", Self::Bottom => "bottom" }
     }
     pub fn parse(value: &str) -> Self {
-        match value { "left" => Self::Left, "right" => Self::Right, _ => Self::Top }
+        match value { "left" => Self::Left, "right" => Self::Right, "bottom" => Self::Bottom, _ => Self::Top }
     }
     pub fn label(self) -> &'static str {
-        match self { Self::Top => "顶部", Self::Left => "左侧", Self::Right => "右侧" }
+        match self { Self::Top => "顶部", Self::Left => "左侧", Self::Right => "右侧", Self::Bottom => "底部" }
     }
-    pub fn is_side(self) -> bool { self != Self::Top }
+    pub fn is_side(self) -> bool { matches!(self, Self::Left | Self::Right) }
+    pub fn is_bottom(self) -> bool { self == Self::Bottom }
 }
 
 /// 岛体大小（百分比）的范围与步进。
@@ -292,6 +295,9 @@ impl Default for Settings {
 
 impl Settings {
     pub fn avoids_top_bar(&self) -> bool { self.avoid_top_bar && !self.top_bar_on_top }
+
+    /// 底部停靠时统一按胶囊画：刘海的两侧肩部只属于屏幕顶边，任务栏条里没有可翻的肩。
+    pub fn pill_shape(&self) -> bool { self.island_shape == IslandShape::Pill || self.dock.is_bottom() }
 
     /// 主窗口（灵动岛）的界面缩放倍率。
     pub fn island_scale(&self) -> f32 {

@@ -599,7 +599,7 @@ fn top_bar_modes_preserve_legacy_settings_and_save_the_selected_display_mode(){
     use crate::model::Settings;
     let path=crate::model::config_dir().join("settings.txt");std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let bounds=crate::display_layout::Bounds{left:-1920,top:-400,right:0,bottom:680};
-    let display=crate::display_layout::Display{id:"test".into(),label:"测试屏".into(),bounds,work_top:-368,primary:true};
+    let display=crate::display_layout::Display{id:"test".into(),label:"测试屏".into(),bounds,work:crate::display_layout::Bounds{top:-368,..bounds},primary:true};
     for enabled in [false,true] {
         std::fs::write(&path,format!("avoid_top_bar={}\n",enabled as u8)).unwrap();
         let mut settings=Settings::load();
@@ -1122,6 +1122,7 @@ struct H {
     file_drop_zone:Option<Rect>,
     hovered_files:Vec<egui::HoveredFile>,
     dropped_files:Vec<egui::DroppedFile>,
+    bottom_bar:f32,
 }
 
 impl H {
@@ -1130,7 +1131,7 @@ impl H {
         std::env::set_var("DAOZAI_DATA_DIR", &dir);
         let ctx = egui::Context::default();
         let app = App::new(&ctx, Options { fetch_lyrics: false, pet_idle: 1e9 });
-        Self { ctx, app, t: 0.0, cursor: None,cmds:vec![],region:Rect::NOTHING,hit:Rect::NOTHING,animating:false,shapes:Vec::new(), bt:Vec::new(),media:Default::default(),power:(None,false),network:None,system_idle:None,screen_locked:false,fullscreen:false,browser_at_top:None,file_drop_zone:None,hovered_files:vec![],dropped_files:vec![] }
+        Self { ctx, app, t: 0.0, cursor: None,cmds:vec![],region:Rect::NOTHING,hit:Rect::NOTHING,animating:false,shapes:Vec::new(), bt:Vec::new(),media:Default::default(),power:(None,false),network:None,system_idle:None,screen_locked:false,fullscreen:false,browser_at_top:None,file_drop_zone:None,hovered_files:vec![],dropped_files:vec![],bottom_bar:0.0 }
     }
     fn frame(&mut self, events: Vec<egui::Event>) {
         self.t += 1.0 / 60.0;
@@ -1160,6 +1161,7 @@ impl H {
             screen_locked:self.screen_locked,
             fullscreen_hidden:self.fullscreen && self.app.settings.hide_fullscreen,
             browser_at_top:self.browser_at_top,
+            bottom_bar:self.bottom_bar,
             ..Default::default()
         };
         let cmds=&mut self.cmds;
@@ -1311,7 +1313,8 @@ fn island_position_drag_clamps_to_existing_limits_and_stays_resident(){
         let mut h=H::new();h.app.settings.dock=dock;h.app.settings.island_shape=shape;
         let start=island_drag_header(&mut h,bounds,1.0);
         island_drag_frame(&mut h,bounds,1.0,Some(start),Some(true));
-        let end=if dock.is_side(){Pos2::new(start.x,3000.0)}else{Pos2::new(1855.0,start.y)};
+        // 侧边停靠时沿本边拖到靠近底角、但不越过换边缓冲的位置，避免被判成拖向底边。
+        let end=if dock.is_side(){Pos2::new(start.x,bounds.bottom as f32-65.0)}else{Pos2::new(1855.0,start.y)};
         for _ in 0..120{island_drag_frame(&mut h,bounds,1.0,Some(end),None);}
         assert!(!h.app.open,"{dock:?} 拖动期间应保持常驻形态");
         assert!(h.app.progress()<0.01,"拖动期间不应保留展开面板");
@@ -1328,12 +1331,33 @@ fn island_position_drag_clamps_to_existing_limits_and_stays_resident(){
     }}
 }
 
+/// 底部停靠：收起时胶囊在任务栏条内垂直居中，展开时面板底边停在条上沿，并且固定胶囊形态。
+#[test]
+fn bottom_dock_keeps_the_pill_in_the_taskbar_strip(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    use crate::model::{Dock,IslandShape};
+    let mut h=H::new();
+    h.app.settings.dock=Dock::Bottom;h.app.settings.island_shape=IslandShape::Notch;
+    assert!(h.app.settings.pill_shape(),"底部停靠固定胶囊形态，刘海在任务栏里放不下");
+    h.app.bottom_bar=45.0;
+    let win=egui::Rect::from_min_size(Pos2::new(0.0,810.0),Vec2::new(960.0,270.0));
+    let collapsed=h.app.island_rect(win,crate::app::PW,crate::app::BAR_H);
+    assert!((collapsed.bottom()-(win.bottom()-7.5)).abs()<0.01,"收起时在任务栏条内垂直居中");
+    assert!((collapsed.left()-(win.left()+crate::app::BOTTOM_LEFT_MARGIN)).abs()<0.01,"底部停靠贴着任务栏左侧空位");
+    assert!(collapsed.right()<win.center().x,"收起态不该伸到任务栏中间，免得压住图标");
+    h.app.h.snap(h.app.expanded_height());
+    assert!(h.app.progress()>0.99);
+    let expanded=h.app.island_rect(win,crate::app::PW,h.app.expanded_height());
+    assert!((expanded.bottom()-(win.bottom()-45.0)).abs()<0.01,"展开时面板底边停在任务栏条上沿");
+    h.app.bottom_bar=0.0;
+    assert_eq!(h.app.island_rect(win,crate::app::PW,crate::app::BAR_H).bottom(),win.bottom(),"没有任务栏时胶囊贴着屏幕底边");
+}
 #[test]
 fn island_position_drag_below_a_top_bar_switches_edges_like_the_bare_screen(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     use crate::model::{Dock,Settings};
     let monitor=crate::display_layout::Bounds{left:0,top:0,right:1920,bottom:1080};
-    let display=crate::display_layout::Display{id:"d".into(),label:"d".into(),bounds:monitor,work_top:28,primary:true};
+    let display=crate::display_layout::Display{id:"d".into(),label:"d".into(),bounds:monitor,work:crate::display_layout::Bounds{top:28,..monitor},primary:true};
     let bounds=crate::display_layout::placement_bounds(&display,true);
     for to in [Dock::Left,Dock::Right] {
         let mut h=H::new();h.app.settings.save();
@@ -1362,7 +1386,7 @@ fn island_position_drag_switches_between_all_three_edges_and_saves_on_release(){
         let start=island_drag_header(&mut h,bounds,ppp);
         island_drag_frame(&mut h,bounds,ppp,Some(start),Some(true));
         let size=Vec2::new(2560.0,1440.0)/ppp;
-        let end=match to {Dock::Top=>Pos2::new(size.x*0.6,0.0),Dock::Left=>Pos2::new(0.0,size.y*0.6),Dock::Right=>Pos2::new(size.x,size.y*0.6)};
+        let end=match to {Dock::Top=>Pos2::new(size.x*0.6,0.0),Dock::Left=>Pos2::new(0.0,size.y*0.6),Dock::Right=>Pos2::new(size.x,size.y*0.6),Dock::Bottom=>Pos2::new(size.x*0.6,size.y)};
         for _ in 0..30{island_drag_frame(&mut h,bounds,ppp,Some(end),None);}
         assert_eq!(h.app.settings.dock,to,"{from:?} → {to:?} / {ppp} / {shape:?}");
         assert!(!h.app.open && h.app.progress()<0.01,"切换停靠边后仍应显示常驻形态");
@@ -4419,8 +4443,8 @@ fn display_choice_saves_and_keeps_disconnected_selection(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.app.settings_open=true;h.ctx.set_embed_viewports(false);
     let bounds=crate::display_layout::Bounds{left:0,top:0,right:1920,bottom:1080};
     h.app.displays=vec![
-        crate::display_layout::Display{id:"internal".into(),label:"显示器 1 · 主屏".into(),bounds,work_top:0,primary:true},
-        crate::display_layout::Display{id:r"\\?\DISPLAY#external".into(),label:"显示器 2 · 外接屏".into(),bounds,work_top:0,primary:false},
+        crate::display_layout::Display{id:"internal".into(),label:"显示器 1 · 主屏".into(),bounds,work:crate::display_layout::Bounds{..bounds},primary:true},
+        crate::display_layout::Display{id:r"\\?\DISPLAY#external".into(),label:"显示器 2 · 外接屏".into(),bounds,work:crate::display_layout::Bounds{..bounds},primary:false},
     ];
     let mut raster=crate::preview_raster::Raster::new(690,560);
     fn frame(h:&mut H,raster:&mut crate::preview_raster::Raster,events:Vec<egui::Event>){

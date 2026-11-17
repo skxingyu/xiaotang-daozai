@@ -289,10 +289,16 @@ impl Shell {
         let origin=self.native.as_ref().and_then(|w|w.logical_origin(ppp)).unwrap_or(origin);
         let cursor = cursor_logical(ppp).map(|(x, y)| Pos2::new(x - origin.x, y - origin.y));
         // 所在屏幕换算到窗口逻辑坐标，供通知详情等浮层避开屏幕边缘。
+        // 底部停靠时岛体贴屏幕底边，位置范围给满屏；顶部/左右才考虑避开顶栏。
+        let avoids_top_bar=self.app.settings.avoids_top_bar() && !self.app.settings.dock.is_bottom();
+        #[cfg(windows)]
+        let bottom_bar=daozai::display_layout::selected(&self.app.displays,&self.app.settings.display_id).map_or(0.0,|d|daozai::display_layout::bar_reach(&d,daozai::model::Dock::Bottom) as f32/ppp);
+        #[cfg(not(windows))]
+        let bottom_bar=0.0;
         #[cfg(windows)]
         let screen=daozai::display_layout::selected(&self.app.displays,&self.app.settings.display_id).map(|d|{
             // 与岛体摆放用同一范围：避开顶栏后，拖动换边和浮层都以顶栏下沿为顶边。
-            let b=daozai::display_layout::placement_bounds(d,self.app.settings.avoids_top_bar());
+            let b=daozai::display_layout::placement_bounds(d,avoids_top_bar);
             egui::Rect::from_min_max(Pos2::new(b.left as f32/ppp-origin.x,b.top as f32/ppp-origin.y),Pos2::new(b.right as f32/ppp-origin.x,b.bottom as f32/ppp-origin.y))
         });
         #[cfg(not(windows))]
@@ -331,6 +337,7 @@ impl Shell {
             bt: self.bt.clone(),
             bt_ready: self.bt_ready,
             screen,
+            bottom_bar,
             backdrop,
             glass_blur,
             opaque_surface: {
@@ -642,9 +649,12 @@ impl eframe::App for Shell {
             let region=if self.hidden {(0.0,0.0,0.0,0.0)} else {r(out.region)};
             let hit=if self.hidden {(0.0,0.0,0.0,0.0)} else {r(out.hit)};
             native.update(region, hit, if self.hidden{None}else{out.notice_hit.map(r)},if self.hidden{None}else{out.file_drop_zone.map(r)},if self.hidden{None}else{out.glass.as_deref()},ctx.pixels_per_point(), out.editing, !self.hidden && out.expanded);
-            if !self.hidden && self.app.settings.avoids_top_bar() && self.app.settings.top_bar_on_top && !self.app.settings.dock.is_side() {
+            let dock=self.app.settings.dock;
+            // 底部停靠时岛体就在任务栏条里，同样要压住任务栏；顶部停靠按「岛仔置顶」设置来。
+            let stay_above=!dock.is_side() && (dock.is_bottom() || (self.app.settings.avoids_top_bar() && self.app.settings.top_bar_on_top));
+            if !self.hidden && stay_above {
                 if let Some(display)=daozai::display_layout::selected(&self.app.displays,&self.app.settings.display_id) {
-                    native.keep_above_top_bar(display.bounds);
+                    native.keep_above_top_bar(display.bounds,dock);
                 }
             }
         }

@@ -43,6 +43,7 @@ pub(crate) const LYRIC_BAR_W: f32 = 300.0;
 pub(crate) const HUD_TRACK_X: f32 = 48.0;
 pub(crate) const HUD_TRACK_W: f32 = 150.0;
 pub const BAR_W_MIN: f32 = 44.0; // 极简小条
+pub const BOTTOM_LEFT_MARGIN: f32 = 10.0; // 底部停靠时岛体离屏幕左沿的距离（任务栏左侧空位）
 pub const BAR_H_MIN: f32 = 4.5;
 pub const FLARE: f32 = 17.6; // 顶部外翻肩宽
 pub const FLARE_H: f32 = 16.0; // 外翻收敛高度
@@ -71,10 +72,12 @@ fn round_rect_points(r:Rect,radius:f32)->Vec<Pos2>{
     points
 }
 
-fn pill_shadow(painter:&egui::Painter,rect:Rect,radius:f32,strength:f32){
+fn pill_shadow(painter:&egui::Painter,rect:Rect,radius:f32,strength:f32,up:bool){
     if strength<=0.01 {return;}
+    // 贴屏幕底边时投影朝上，和贴顶边时一样由内向外变淡。
+    let flip=|v:Vec2| if up {Vec2::new(v.x,-v.y)} else {v};
     for (grow,a) in [(10.0f32,0.035f32),(6.5,0.05),(3.5,0.07),(1.5,0.09)] {
-        let r=Rect::from_min_max(rect.min-Vec2::new(grow*0.6,grow*0.3),rect.max+Vec2::new(grow*0.6,grow));
+        let r=Rect::from_min_max(rect.min-flip(Vec2::new(grow*0.6,grow*0.3)),rect.max+flip(Vec2::new(grow*0.6,grow)));
         painter.rect_filled(r,radius+grow*0.8,Color32::from_black_alpha((255.0*a*strength) as u8));
     }
 }
@@ -141,6 +144,8 @@ pub struct Env {
     pub bt_ready: bool,
     /// 岛所在屏幕（与 `win` 同一坐标系，逻辑点）；用于让通知详情留在屏幕内。
     pub screen: Option<Rect>,
+    /// 底部任务栏的厚度（逻辑点）；0 表示该边没有任务栏，岛体直接贴桌面底边。
+    pub bottom_bar: f32,
     /// 毛玻璃皮肤：岛体四周采样得到的背景色（sRGB 0..1）。
     pub backdrop: Option<[f32; 3]>,
     /// 毛玻璃皮肤：系统背景模糊当前是否生效。
@@ -809,6 +814,8 @@ pub struct App {
     fluid_art:Option<egui::TextureId>,
     fluid_title:String,
     screen:Option<Rect>,
+    /// 底部任务栏厚度（逻辑点，每帧从 `Env` 同步），底部停靠时按它把岛体放进条里。
+    pub(crate) bottom_bar:f32,
     pub(crate) settings_focus_requested:bool,
     pub(crate) settings_tab:usize,
     pub(crate) settings_category:usize,
@@ -975,7 +982,7 @@ impl App {
             media_anchor: (String::new(), 0.0, 0.0, false),
             media: NowPlaying::default(),
             music_artwork: None,
-            forced_open_until:0.0, settings_open:false, settings_window:std::sync::Arc::new(std::sync::Mutex::new(crate::settings_window::State::load())), displays:Vec::new(), browser_at_top:false, browser_minimal_active:false, glass_tint:0.0, fluid:Default::default(), fluid_origin:Pos2::ZERO, fluid_art:None, fluid_title:String::new(), screen:None, settings_focus_requested:false, settings_tab:0, settings_category:0, messenger_statuses:Default::default(), notification_apps:model::NotificationApps::load(), subpage:None, task_dialog:None,
+            forced_open_until:0.0, settings_open:false, settings_window:std::sync::Arc::new(std::sync::Mutex::new(crate::settings_window::State::load())), displays:Vec::new(), browser_at_top:false, browser_minimal_active:false, glass_tint:0.0, fluid:Default::default(), fluid_origin:Pos2::ZERO, fluid_art:None, fluid_title:String::new(), screen:None, bottom_bar:0.0, settings_focus_requested:false, settings_tab:0, settings_category:0, messenger_statuses:Default::default(), notification_apps:model::NotificationApps::load(), subpage:None, task_dialog:None,
             listener_status: "尚未连接".into(),
             notification_bell_until: 0.0, notification_bell_at: -10.0, notice: None, hud_notice: None, hud_alpha: 0.0, notice_width:Spring::new(0.0,CLOSE.0,CLOSE.1), notice_details:false, pending_messengers:Vec::new(), messenger_scroll:0.0, alerts: Default::default(), history: Default::default(), pending: vec![],
             todo_first: 0, todo_choosing: false, pet: Default::default(), last_drink: None,
@@ -1792,6 +1799,7 @@ impl App {
         self.dt = dt;
         if let Some(at_top)=env.browser_at_top {self.browser_at_top=at_top;}
         self.screen=env.screen;
+        self.bottom_bar=env.bottom_bar.max(0.0);
         if self.settings.skin.is_glass() {
             let target=if self.settings.skin==model::Skin::GlassLight {glass::light_tint(env.backdrop,env.glass_blur)}else{glass::glass_tint(env.backdrop,env.glass_blur)};
             self.glass_tint=if self.glass_tint<=0.0 {target}else{anim::approach(self.glass_tint,target,3.0,dt)};
@@ -1846,10 +1854,12 @@ impl App {
         }
         self.update_island_lyric_layout(&ctx);
 
-        let cx = win.center().x;
+        // 岛体中心：顶部居中，底部停靠贴着任务栏左侧空位（用当前宽度，收起时就是胶囊宽度）。
+        let cx = self.island_cx(win, self.w.pos);
         // 胶囊皮肤悬浮在屏幕顶边下方。
-        let pill = self.settings.island_shape==model::IslandShape::Pill;
-        let top = win.top() + if pill { PILL_GAP } else { 0.0 };
+        let pill = self.settings.pill_shape();
+        // 岛体贴着画布的那条水平边：顶部停靠是上沿，底部停靠是下沿（随展开向上抬）。
+        let top = if self.dock().is_bottom() { win.bottom() - self.bottom_lift() } else { win.top() + if pill { PILL_GAP } else { 0.0 } };
         let side = self.side();
         let dock = self.dock();
 
@@ -1880,7 +1890,11 @@ impl App {
 
         // ---------- 输入：悬停 ----------
         let p_prev = self.progress();
-        let hit = if side {self.side_hit_rect(win,p_prev)} else {self.hit_rect(cx, top, p_prev)};
+        let hit = if side {self.side_hit_rect(win,p_prev)} else {
+            let r=self.hit_rect(cx, top, p_prev);
+            // 底部停靠展开时岛体往上抬，命中区跟着抬会让光标掉出去，所以一直延伸到屏幕底边。
+            if dock.is_bottom() {Rect::from_min_max(r.min,Pos2::new(r.right(),win.bottom()))} else {r}
+        };
         let previous_menu=self.shelf_menu_rect.take();
         let inside = env.cursor.is_some_and(|c| hit.contains(c) || previous_menu.is_some_and(|r|r.contains(c)));
         let on_notice=env.cursor.is_some_and(|c|self.messenger_badge_rect(win,self.island_rect(win,self.w.pos,self.h.pos)).is_some_and(|r|r.contains(c)) || self.notice_rect(cx,top).is_some_and(|r|r.contains(c))||self.notice_details_rect(cx,top).is_some_and(|r|r.contains(c)));
@@ -1986,7 +2000,7 @@ impl App {
         // 毛玻璃：真实模糊下保留柔和投影增加层次；无模糊时阴影再减淡一些，保持轻盈。
         let skin_shadow = if !glass_skin {1.0} else if env.glass_blur {0.75} else {0.7};
         let shadow_k = glass::shadow_alpha(0.0, thick) / 0.12 * skin_shadow;
-        let island_shadow=|r:Rect,flare:f32,flare_h:f32,radius:f32,strength:f32| if pill {pill_shadow(&painter,r,radius,strength)} else if side {shape::shadow_docked(&painter,r,dock,flare,flare_h,radius,strength)} else {shape::shadow(&painter,r,flare,flare_h,radius,strength)};
+        let island_shadow=|r:Rect,flare:f32,flare_h:f32,radius:f32,strength:f32| if pill {pill_shadow(&painter,r,radius,strength,!self.dock().is_bottom())} else if side {shape::shadow_docked(&painter,r,dock,flare,flare_h,radius,strength)} else {shape::shadow(&painter,r,flare,flare_h,radius,strength)};
         // 拿起时投影加深，像被从屏幕边缘提起来。
         let lifted = self.drag_lift.pos.clamp(0.0, 1.2);
         island_shadow(body, flare, flare_h, radius, (smoothstep(0.1, 0.9, pc) + lifted * 0.9) * shadow_k);
@@ -2100,12 +2114,14 @@ impl App {
         }
         // 岛下的确认提示使用独立裁剪区域，收起时跟随岛体下沿。
         let floating_toast=if self.toast_below && self.toast.is_some() {
-            // 侧边停靠：提示出现在胶囊正下方，靠边时向内挪，保证完整显示。
-            let toast_origin=if side {
+            // 侧边停靠：提示出现在胶囊正下方，靠边时向内挤，保证完整显示。
+            // 底部停靠：提示撑在岛体上方，否则会落到屏幕下沿之外。
+            let (toast_origin,base_y)=if side {
                 let center=if dock==model::Dock::Left {panel.center().x.max(win.left()+90.0)} else {panel.center().x.min(win.right()-90.0)};
-                Pos2::new(center-PW/2.0,panel.top())
-            } else {origin};
-            self.toast_layer(&Card::new(ui,toast_origin,win),h+8.0)
+                (Pos2::new(center-PW/2.0,panel.top()),h+8.0)
+            } else if dock==model::Dock::Bottom {(Pos2::new(origin.x,panel.top()-30.0),0.0)}
+            else {(origin,h+8.0)};
+            self.toast_layer(&Card::new(ui,toast_origin,win),base_y)
         }else{None};
         if (self.adding||self.editing.is_some()) && reveal > 0.9 && self.page == 4 && self.page_e() > 0.25 {
             self.input_field(ui, origin, &mut cmds);
@@ -2128,10 +2144,10 @@ impl App {
             if dock==model::Dock::Left {Rect::from_min_max(Pos2::new(win.left(),r.top()),r.max)} else {Rect::from_min_max(r.min,Pos2::new(win.right(),r.bottom()))}
         } else if p > 0.02 || self.open {
             let height=self.expanded_height().max(self.h.pos)*1.08+16.0;
-            Rect::from_center_size(Pos2::new(cx, top + height/2.0), Vec2::new(PW + FLARE * 2.0 + 56.0, height))
+            Rect::from_center_size(Pos2::new(cx, self.grow_center(top,height)), Vec2::new(PW + FLARE * 2.0 + 56.0, height))
         } else {
             let (bw, bh) = self.base_size();
-            Rect::from_center_size(Pos2::new(cx, top + (bh * SWELL.1 + 12.0) / 2.0), Vec2::new(bw * SWELL.0 + 24.0, bh * SWELL.1 + 12.0))
+            Rect::from_center_size(Pos2::new(cx, self.grow_center(top,bh * SWELL.1 + 12.0)), Vec2::new(bw * SWELL.0 + 24.0, bh * SWELL.1 + 12.0))
         };
         // 拿起放大、甩动拉伸以及加深的投影都要留在窗口区域内，否则两端会被系统裁掉。
         if self.drag_lift.pos.abs()>0.005 || self.drag_stretch.pos.abs()>0.001 {region=region.union(panel.expand2(Vec2::new(18.0,22.0)));}
@@ -2139,8 +2155,9 @@ impl App {
         if let Some(r)=messenger_rect{region=region.union(r.expand(5.0));}
         if let Some(rect)=notice_shape {region=region.union(rect.expand2(Vec2::new(12.0,8.0)));}
         if let Some(rect)=notice_details {region=region.union(rect.expand(12.0));}
-        // 胶囊上方留空的那一小条也要在窗口区域内，阴影才不会被截断。
-        if pill && !side {region.min.y=region.min.y.min(win.top());}
+        // 胶囊外侧留空的那一小条也要在窗口区域内，阴影才不会被截断。
+        if pill && !side && self.dock().is_bottom() {region.max.y=region.max.y.max(win.bottom());}
+        else if pill && !side {region.min.y=region.min.y.min(win.top());}
         // 浅色皮肤：把这一帧岛体内容统一换成皮肤配色。
         if let Some(palette)=palette {
             let end=crate::skin_paint::shape_count(&ctx,layer);
@@ -2205,7 +2222,7 @@ impl App {
             glass: glass_region,
             hit: rel(if side {self.side_hit_rect(win,self.progress())} else {self.hit_rect(cx, top, self.progress())}),
             notice_hit:notice_shape.into_iter().chain(notice_details).chain(messenger_rect).chain(self.shelf_menu_rect).reduce(|a,b|a.union(b)).map(rel),
-            file_drop_zone:self.settings.visible_pages[3].then(||rel(if side {self.island_rect(win,PW,self.expanded_height())} else {Rect::from_min_size(Pos2::new(cx-PW/2.0,top),Vec2::new(PW,96.0))})),
+            file_drop_zone:self.settings.visible_pages[3].then(||rel(if side {self.island_rect(win,PW,self.expanded_height())} else {self.grow(cx-PW/2.0,top,PW,96.0)})),
             expanded: self.open,
             editing: self.is_editing(),
             animating,
@@ -2214,10 +2231,23 @@ impl App {
         }
     }
 
+    /// 从贴边的一头铺开 `w × h`：顶部停靠向下生长，底部停靠向上生长。
+    fn grow(&self, x: f32, near: f32, w: f32, h: f32) -> Rect {
+        if self.dock().is_bottom() {Rect::from_min_max(Pos2::new(x, near - h), Pos2::new(x + w, near))}
+        else {Rect::from_min_max(Pos2::new(x, near), Pos2::new(x + w, near + h))}
+    }
+
+    /// 贴边处高 `h` 一段的中点（区域汇总用）。
+    fn grow_center(&self, near: f32, h: f32) -> f32 {
+        if self.dock().is_bottom() {near - h / 2.0} else {near + h / 2.0}
+    }
+
     fn hit_rect(&self, cx: f32, top: f32, p: f32) -> Rect {
         let r=self.hit_rect_base(cx,top,p);
-        // 胶囊离屏幕顶边有一段空隙：把光标推到屏幕最顶端也要能唤出岛。
-        if self.settings.island_shape==model::IslandShape::Pill {Rect::from_min_max(Pos2::new(r.left(),r.top()-PILL_GAP),r.max)} else {r}
+        // 胶囊离屏幕边缘有一段空隙：把光标推到屏幕最边上也要能唤出岛。
+        if !self.settings.pill_shape() {return r;}
+        if self.dock().is_bottom() {Rect::from_min_max(r.min,Pos2::new(r.right(),r.bottom()+PILL_GAP))}
+        else {Rect::from_min_max(Pos2::new(r.left(),r.top()-PILL_GAP),r.max)}
     }
 
     fn hit_rect_base(&self, cx: f32, top: f32, p: f32) -> Rect {
@@ -2225,15 +2255,14 @@ impl App {
             let (width,height)=self.base_size();
             let width=self.w.pos.min(width);
             let height=self.h.pos.min(height);
-            Rect::from_min_size(Pos2::new(cx-width/2.0,top),Vec2::new(width,height))
+            self.grow(cx-width/2.0,top,width,height)
         } else if self.notice.is_some()&&!self.compact_notices()&&!self.open {
-            let (w,h)=self.base_size();Rect::from_min_size(Pos2::new(cx-(w+8.0)/2.0,top),Vec2::new(w+8.0,h+6.0))
+            let (w,h)=self.base_size();self.grow(cx-(w+8.0)/2.0,top,w+8.0,h+6.0)
         } else if p > 0.04 || self.open {
-            Rect::from_min_size(Pos2::new(cx - PW / 2.0 - 4.0, top), Vec2::new(PW + 8.0, self.expanded_height() + 2.0))
+            self.grow(cx - PW / 2.0 - 4.0, top, PW + 8.0, self.expanded_height() + 2.0)
         } else {
             let (bw,bh)=self.base_size();
-            let (hit_w,hit_h)=(bw+12.0,bh+4.0);
-            Rect::from_min_size(Pos2::new(cx-hit_w/2.0,top),Vec2::new(hit_w,hit_h))
+            self.grow(cx-(bw+12.0)/2.0,top,bw+12.0,bh+4.0)
         }
     }
 
@@ -2294,7 +2323,8 @@ impl App {
             let left=self.dock()==model::Dock::Right || self.dock()==model::Dock::Top && full.right()+UNREAD_GAP+UNREAD_W>bounds.right();
             let width=UNREAD_W*appear;
             let x=if left {panel.left()-UNREAD_GAP*appear-width}else{panel.right()+UNREAD_GAP*appear};
-            return Some(Rect::from_min_size(Pos2::new(x,panel.top()+inset),Vec2::new(width,height*appear)));
+            let y=if self.dock().is_bottom() {panel.bottom()-inset-height*appear} else {panel.top()+inset};
+            return Some(Rect::from_min_size(Pos2::new(x,y),Vec2::new(width,height*appear)));
         }
         // 极简刘海：横幅照常弹出，收起后只留细线，未读不常挂在线条上；展开岛体时在面板旁出现。
         if self.effective_minimal(){return None;}
@@ -2308,7 +2338,9 @@ impl App {
             (panel.center().x-width/2.0,panel.bottom())
         }else{
             let right=panel.right()+self.notice_width.pos;
-            let y=if self.notice.is_some() && !self.compact_notices(){panel.center().y-BAR_H/2.0}else{panel.top()};
+            let y=if self.notice.is_some() && !self.compact_notices(){panel.center().y-BAR_H/2.0}
+                else if self.dock().is_bottom(){panel.bottom()-height}
+                else {panel.top()};
             (if right+width<=bounds.right(){right}else{panel.left()-width},y)
         };
         Some(Rect::from_min_size(Pos2::new(x,y),Vec2::new(width,height)))
@@ -2407,7 +2439,7 @@ impl App {
     fn notice_rect(&self,cx:f32,top:f32)->Option<Rect>{
         if !self.compact_notices(){return None;}
         let width=self.notice_width.pos-8.0;
-        (width>0.5).then(||Rect::from_min_size(Pos2::new(cx+self.w.pos/2.0+8.0,top),Vec2::new(width,BAR_H)))
+        (width>0.5).then(||self.grow(cx+self.w.pos/2.0+8.0,top,width,BAR_H))
     }
     fn notice_details_rect(&self,cx:f32,top:f32)->Option<Rect>{
         let a=self.hud_notice.as_ref().filter(|_|self.notice_details&&self.notice.is_some())?;
@@ -2415,7 +2447,9 @@ impl App {
         let mut x=badge.left();
         // 岛体靠近屏幕右缘时，详情卡片向左展开，始终完整留在屏幕内。
         if let Some(screen)=self.screen {x=x.min(screen.right()-width-8.0).max(screen.left()+8.0);}
-        Some(Rect::from_min_size(Pos2::new(x,badge.bottom()+6.0),Vec2::new(width,height)))
+        // 底部停靠时详情卡片长在胶囊上方，否则会落到屏幕下沿之外。
+        let y=if self.dock().is_bottom() {badge.top()-6.0-height} else {badge.bottom()+6.0};
+        Some(Rect::from_min_size(Pos2::new(x,y),Vec2::new(width,height)))
     }
 
     /// 当前皮肤的换色调色板（经典为 None）。
@@ -2454,7 +2488,7 @@ impl App {
     fn paint_body(&self,painter:&egui::Painter,rect:Rect,flare:f32,flare_h:f32,radius:f32,feather:f32){
         let skin=self.settings.skin;
         if skin==model::Skin::Fluid {
-            let pill=self.settings.island_shape==model::IslandShape::Pill;
+            let pill=self.settings.pill_shape();
             let (map,frame)=shape::EdgeMap::of(rect,if pill {model::Dock::Top}else{self.dock()});
             let mut rows=shape::sections(frame,flare,flare_h,radius);
             if pill {
@@ -2474,7 +2508,7 @@ impl App {
             painter.add(egui::Shape::mesh(mesh));
             return;
         }
-        if self.settings.island_shape==model::IslandShape::Pill {
+        if self.settings.pill_shape() {
             let radius=radius.min(rect.height().min(rect.width())*0.5);
             painter.rect_filled(rect,radius,self.glass_fill());
             if skin.is_glass() && rect.height()>=10.0 {
@@ -2513,7 +2547,7 @@ impl App {
     /// 拿起时沿岛体轮廓的一圈柔光：外圈宽而淡，内圈细而亮。
     fn paint_lift_halo(&self,painter:&egui::Painter,rect:Rect,flare:f32,flare_h:f32,radius:f32,amount:f32) {
         if rect.width()<10.0 || rect.height()<10.0 {return;}
-        let pill=self.settings.island_shape==model::IslandShape::Pill;
+        let pill=self.settings.pill_shape();
         let dock=self.dock();
         for (grow,width,alpha) in [(2.0f32,4.0f32,22.0f32),(0.5,1.2,90.0)] {
             let stroke=egui::Stroke::new(width,Color32::from_white_alpha((alpha*amount) as u8));
@@ -2536,7 +2570,7 @@ impl App {
             if let (Some(cursor),Some(screen))=(env.cursor,env.screen) {
                 // 使用屏幕内坐标，窗口移动或横竖画布切换不会累积位移。
                 let cursor=cursor-screen.min;
-                let edges=[(model::Dock::Top,cursor.y.max(0.0)),(model::Dock::Left,cursor.x.max(0.0)),(model::Dock::Right,(screen.width()-cursor.x).max(0.0))];
+                let edges=[(model::Dock::Top,cursor.y.max(0.0)),(model::Dock::Left,cursor.x.max(0.0)),(model::Dock::Right,(screen.width()-cursor.x).max(0.0)),(model::Dock::Bottom,(screen.height()-cursor.y).max(0.0))];
                 let &(nearest,distance)=edges.iter().min_by(|a,b|a.1.total_cmp(&b.1)).unwrap();
                 let current=edges.iter().find(|(dock,_)|*dock==self.dock()).unwrap().1;
                 // 靠近新边缘才换边；角落保留缓冲，防止横竖形态来回跳变。
@@ -2620,7 +2654,7 @@ impl App {
         let dock=self.dock();
         let side=dock.is_side();
         let along=if side {Vec2::Y}else{Vec2::X};
-        let pill=self.settings.island_shape==model::IslandShape::Pill;
+        let pill=self.settings.pill_shape();
         let outline=|grow:f32| if pill {round_rect_points(body.expand(grow),radius+grow)}
             else if side {shape::outline_docked(body.expand(grow),dock,flare,flare_h,radius+grow)}
             else {shape::outline(body.expand(grow),flare,flare_h,radius+grow)};
@@ -2647,6 +2681,7 @@ impl App {
             let off=self.placement_offset()*travel;
             let (out,edge)=match dock {
                 model::Dock::Top=>(Vec2::Y,Pos2::new(panel.center().x,panel.bottom())),
+                model::Dock::Bottom=>(-Vec2::Y,Pos2::new(panel.center().x,panel.top())),
                 model::Dock::Left=>(Vec2::X,Pos2::new(panel.right(),panel.center().y)),
                 model::Dock::Right=>(-Vec2::X,Pos2::new(panel.left(),panel.center().y)),
             };

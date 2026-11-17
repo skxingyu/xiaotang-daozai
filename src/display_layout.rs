@@ -4,16 +4,31 @@ pub struct Bounds { pub left:i32, pub top:i32, pub right:i32, pub bottom:i32 }
 
 #[derive(Clone, Debug)]
 pub struct Display { pub id:String, pub label:String, pub bounds:Bounds,
-    /// 工作区顶边：顶栏类软件或置顶的任务栏登记后会比 `bounds.top` 更靠下。
-    pub work_top:i32, pub primary:bool }
+    /// 工作区：任务栏或置顶的顶栏类软件登记占用后会比 `bounds` 更小，四边都可能内缩。
+    pub work:Bounds, pub primary:bool }
 
 /// 岛体摆放用的屏幕范围：开启「避开顶栏」时顶边换成工作区顶边。
 /// 只认屏幕上方三分之一以内的占用，异常的工作区不会把岛推到屏幕中间。
 pub fn placement_bounds(display:&Display, avoid_top_bar:bool)->Bounds {
     let mut b=display.bounds;
-    let reserved=display.work_top-b.top;
-    if avoid_top_bar && reserved>0 && reserved<=(b.bottom-b.top)/3 {b.top=display.work_top;}
+    let reserved=display.work.top-b.top;
+    if avoid_top_bar && reserved>0 && reserved<=(b.bottom-b.top)/3 {b.top=display.work.top;}
     b
+}
+
+/// 该边的任务栏 / 顶栏厚度（物理像素）：屏幕边与工作区边之差。
+/// 只认该边长三分之一以内的占用，异常工作区（全屏占位、虚拟桌面）按 0 处理。
+pub fn bar_reach(display:&Display, dock:crate::model::Dock)->i32 {
+    let (b,w)=(&display.bounds,&display.work);
+    let reach=match dock {
+        crate::model::Dock::Top=>w.top-b.top,
+        crate::model::Dock::Bottom=>b.bottom-w.bottom,
+        crate::model::Dock::Left=>w.left-b.left,
+        crate::model::Dock::Right=>b.right-w.right,
+    };
+    // 上限按垂直于这条边的屏幕尺寸算：顶部/底部用屏高，左右用屏宽。
+    let span=if dock.is_side() {b.right-b.left}else{b.bottom-b.top};
+    if reach>0 && reach<=span/3 {reach} else {0}
 }
 
 pub fn selected<'a>(displays:&'a [Display],id:&str)->Option<&'a Display>{
@@ -37,7 +52,8 @@ pub fn connected()->Vec<Display>{
             let primary=info.monitorInfo.dwFlags&1!=0;
             let label=format!("显示器 {number}{} · {} × {}{}",if name.is_empty(){String::new()}else{format!(" · {name}")},r.right-r.left,r.bottom-r.top,if primary{" · 主屏"}else{""});
             let displays=&mut *(data.0 as *mut Vec<Display>);
-            displays.push(Display{id:if stable_id.is_empty(){device}else{stable_id},label,bounds:Bounds{left:r.left,top:r.top,right:r.right,bottom:r.bottom},work_top:info.monitorInfo.rcWork.top,primary});
+            let work=info.monitorInfo.rcWork;
+            displays.push(Display{id:if stable_id.is_empty(){device}else{stable_id},label,bounds:Bounds{left:r.left,top:r.top,right:r.right,bottom:r.bottom},work:Bounds{left:work.left,top:work.top,right:work.right,bottom:work.bottom},primary});
         }
         BOOL(1)
     }
@@ -185,7 +201,7 @@ mod shift_slack_tests {
 #[cfg(test)]
 mod top_bar_tests {
     use super::*;
-    fn display(bounds:Bounds,work_top:i32)->Display {Display{id:"d".into(),label:"d".into(),bounds,work_top,primary:true}}
+    fn display(bounds:Bounds,work_top:i32)->Display {Display{id:"d".into(),label:"d".into(),bounds,work:Bounds{top:work_top,..bounds},primary:true}}
     #[test]
     fn avoiding_the_top_bar_starts_below_it_and_keeps_other_edges(){
         for (m,bar) in [(Bounds{left:0,top:0,right:1920,bottom:1080},28),(Bounds{left:-2560,top:-400,right:0,bottom:1040},42)] {
@@ -201,6 +217,19 @@ mod top_bar_tests {
         let m=Bounds{left:0,top:0,right:1920,bottom:1080};
         for work_top in [0,-20,361,1080,2000] {assert_eq!(placement_bounds(&display(m,work_top),true),m,"{work_top}");}
         assert_eq!(placement_bounds(&display(m,360),true).top,360);
+    }
+    #[test]
+    fn taskbar_thickness_comes_from_the_work_area_inset_on_each_edge(){
+        use crate::model::Dock;
+        let m=Bounds{left:0,top:0,right:1920,bottom:1080};
+        let d=|work:Bounds|Display{id:"d".into(),label:"d".into(),bounds:m,work,primary:true};
+        let bar=|top:i32,bottom:i32|d(Bounds{top,bottom,..m});
+        assert_eq!(bar_reach(&bar(0,1080-45),Dock::Bottom),45,"底部任务栏厚度");
+        assert_eq!(bar_reach(&bar(0,1080-45),Dock::Top),0);
+        assert_eq!(bar_reach(&bar(28,1080),Dock::Top),28);
+        assert_eq!(bar_reach(&bar(0,1080),Dock::Left),0);
+        assert_eq!(bar_reach(&bar(0,1080-400),Dock::Bottom),0,"超过三分之一屏高不算任务栏");
+        assert_eq!(bar_reach(&bar(0,1080),Dock::Bottom),0,"工作区就是整屏时没有任务栏");
     }
 }
 
@@ -278,8 +307,8 @@ mod tests {
         if !displays.is_empty(){assert_eq!(displays.iter().filter(|d|d.primary).count(),1);}
     }
     #[test] fn display_selection_survives_reordering_disconnect_and_reconnect(){
-        let primary=Display{id:"internal".into(),label:"内屏".into(),bounds:Bounds{left:0,top:0,right:1920,bottom:1080},work_top:0,primary:true};
-        let external=Display{id:"external".into(),label:"外屏".into(),bounds:Bounds{left:-2560,top:-400,right:0,bottom:1040},work_top:-400,primary:false};
+        let primary=Display{id:"internal".into(),label:"内屏".into(),bounds:Bounds{left:0,top:0,right:1920,bottom:1080},work:Bounds{left:0,top:0,right:1920,bottom:1080},primary:true};
+        let external=Display{id:"external".into(),label:"外屏".into(),bounds:Bounds{left:-2560,top:-400,right:0,bottom:1040},work:Bounds{left:-2560,top:-400,right:0,bottom:1040},primary:false};
         for displays in [vec![primary.clone(),external.clone()],vec![external.clone(),primary.clone()]] {
             assert_eq!(selected(&displays,"").unwrap().id,"internal");
             let target=selected(&displays,"external").unwrap();assert_eq!(target.id,"external");

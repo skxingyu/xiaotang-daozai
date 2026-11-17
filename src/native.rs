@@ -332,8 +332,9 @@ fn surface_needs_outline_clip(backend:Option<eframe::wgpu::Backend>,vendor:&str,
     })
 }
 
-/// 只识别同屏顶部的宽条窗口，普通弹窗、全屏窗口和其他屏幕不触发抬高。
-unsafe fn top_bar_above(hwnd:HWND,bounds:crate::display_layout::Bounds)->bool {
+/// 只识别同屏贴边处的宽条窗口，普通弹窗、全屏窗口和其他屏幕不触发抬高。
+/// 顶部停靠找顶部的条（顶栏/任务栏），底部停靠找贴着屏幕底边的条。
+unsafe fn top_bar_above(hwnd:HWND,bounds:crate::display_layout::Bounds,dock:crate::model::Dock)->bool {
     let mut island=RECT::default();
     if !IsWindowVisible(hwnd).as_bool() || GetWindowRect(hwnd,&mut island).is_err(){return false;}
     let mut current=hwnd;
@@ -341,14 +342,13 @@ unsafe fn top_bar_above(hwnd:HWND,bounds:crate::display_layout::Bounds)->bool {
         current=previous;
         if !IsWindowVisible(current).as_bool() || GetWindowLongPtrW(current,GWL_EXSTYLE)&WS_EX_TOPMOST.0 as isize==0 {continue;}
         let mut bar=RECT::default();
-        if GetWindowRect(current,&mut bar).is_ok()
-            && bar.top<=bounds.top && bar.bottom>bounds.top
-            && bar.bottom-bar.top<=(bounds.bottom-bounds.top)/8
-            && bar.right-bar.left>=(bounds.right-bounds.left)/2
-            && bar.left<island.right && bar.right>island.left
-            && bar.bottom>island.top {
-            return true;
-        }
+        if GetWindowRect(current,&mut bar).is_err() || bar.bottom-bar.top>(bounds.bottom-bounds.top)/8 || bar.right-bar.left<(bounds.right-bounds.left)/2 {continue;}
+        let hit=if dock.is_bottom() {
+            bar.bottom>=bounds.bottom && bar.left<island.right && bar.right>island.left && bar.top<island.bottom
+        } else {
+            bar.top<=bounds.top && bar.bottom>bounds.top && bar.left<island.right && bar.right>island.left && bar.bottom>island.top
+        };
+        if hit {return true;}
     }
     false
 }
@@ -426,9 +426,9 @@ impl Window {
     pub fn hwnd(&self)->HWND {self.hwnd}
 
     /// 顶栏重新置顶后恢复岛体层级；没有遮挡时不修改窗口顺序，也不激活窗口。
-    pub fn keep_above_top_bar(&mut self,bounds:crate::display_layout::Bounds) {
+    pub fn keep_above_top_bar(&mut self,bounds:crate::display_layout::Bounds,dock:crate::model::Dock) {
         let display=match &self.layering {Layering::Active(layered)=>layered.display(),_=>self.hwnd};
-        if unsafe{top_bar_above(display,bounds)} {
+        if unsafe{top_bar_above(display,bounds,dock)} {
             unsafe{let _=SetWindowPos(self.hwnd,HWND_TOPMOST,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);}
             if let Layering::Active(layered)=&mut self.layering {layered.sync(self.hwnd,true);}
         }
@@ -470,18 +470,19 @@ impl Window {
     /// `shift` 是 OLED 像素偏移的位移（物理像素），按展开面板的屏幕余量收窄后叠加在不贴边的一轴上。
     pub fn place_on_display(&self, scale:f32, bounds:crate::display_layout::Bounds, offset:f32, dock:crate::model::Dock, shift:(i32,i32))->bool {
         unsafe {
-            // 顶部：水平居中 + 水平偏移；左右：贴边 + 竖直偏移，画布换成竖向的大小。
+            // 顶部：水平居中 + 水平偏移；左右：贴边 + 竖直偏移，画布换成竖向的大小；
+            // 底部：画布底边对齐屏幕底边，岛体在画布里靠下沿摆放（见 App::bottom_lift）。
             let origin=if dock.is_side() {
                 crate::display_layout::side_origin(bounds,dock,(crate::side_dock::SIDE_W,crate::side_dock::SIDE_H),crate::side_dock::SIDE_HALF_EXTENT,scale,offset)
             } else {crate::display_layout::island_origin_offset(bounds,crate::app::WIN_W,scale,offset)};
             let Some((x,y))=origin else{return false;};
+            let (canvas_w,canvas_h)=if dock.is_side() {(crate::side_dock::SIDE_W,crate::side_dock::SIDE_H)} else {(crate::app::CANVAS_W,crate::app::WIN_H)};
+            let (w,h)=((canvas_w*scale).round() as i32,(canvas_h*scale).round() as i32);
             // OLED 像素偏移：只沿不贴边的一轴让开，并按展开面板的余量收窄——位置拉满或屏幕太窄时少挪、不挪，
             // 贴边的一侧也保持严丝合缝，刘海不会和屏幕边缘裂开。
             let (back,forth)=crate::display_layout::shift_slack(bounds,scale,if dock.is_side() {crate::side_dock::SIDE_HALF_EXTENT} else {crate::display_layout::ISLAND_HALF_EXTENT},offset,dock);
             let (dx,dy)=(shift.0.clamp(-back,forth),shift.1.clamp(-back,forth));
-            let (x,y)=if dock.is_side() {(x,y+dy)} else {(x+dx,y)};
-            let (canvas_w,canvas_h)=if dock.is_side() {(crate::side_dock::SIDE_W,crate::side_dock::SIDE_H)} else {(crate::app::CANVAS_W,crate::app::WIN_H)};
-            let (w,h)=((canvas_w*scale).round() as i32,(canvas_h*scale).round() as i32);
+            let (x,y)=if dock.is_side() {(x,y+dy)} else if dock.is_bottom() {(bounds.left+dx.max(0),bounds.bottom-h)} else {(x+dx,y)};
             let mut current=RECT::default();
             if GetWindowRect(self.hwnd,&mut current).is_err(){return false;}
             let moved=(current.left,current.top)!=(x,y);
@@ -839,19 +840,19 @@ mod tests {
                 let display=match &native.layering {Layering::Active(layered)=>layered.display(),_=>island.0};
                 let foreground=GetForegroundWindow();
                 SetWindowPos(cover.0,HWND_TOPMOST,bounds.left,bounds.top,1920,32,flags).unwrap();
-                assert!(top_bar_above(display,bounds),"复现顶栏遮挡，兼容渲染={layered}");
-                native.keep_above_top_bar(bounds);
-                assert!(!top_bar_above(display,bounds),"收起时也应恢复实际层级，兼容渲染={layered}");
+                assert!(top_bar_above(display,bounds,crate::model::Dock::Top),"复现顶栏遮挡，兼容渲染={layered}");
+                native.keep_above_top_bar(bounds,crate::model::Dock::Top);
+                assert!(!top_bar_above(display,bounds,crate::model::Dock::Top),"收起时也应恢复实际层级，兼容渲染={layered}");
                 assert_eq!(GetForegroundWindow(),foreground,"置顶不能抢走输入焦点");
                 for (x,y,w,h) in [(-10000,-10000,400,140),(-10480,-10000,1920,300),(-10480,-10000,1920,1080),(-10480,-9600,1920,32),(-12400,-10000,1920,32)] {
                     SetWindowPos(cover.0,HWND_TOPMOST,x,y,w,h,flags).unwrap();
-                    assert!(!top_bar_above(display,bounds),"普通弹窗、全屏窗口和其他屏幕不触发顶栏适配");
-                    native.keep_above_top_bar(bounds);
+                    assert!(!top_bar_above(display,bounds,crate::model::Dock::Top),"普通弹窗、全屏窗口和其他屏幕不触发顶栏适配");
+                    native.keep_above_top_bar(bounds,crate::model::Dock::Top);
                     assert!(above(cover.0,display),"不应越过无关弹窗争抢置顶");
                 }
                 SetWindowPos(cover.0,HWND_TOPMOST,bounds.left,bounds.top,1920,32,flags).unwrap();
                 let _=ShowWindow(cover.0,SW_HIDE);
-                assert!(!top_bar_above(display,bounds),"隐藏的顶栏不触发抬高");
+                assert!(!top_bar_above(display,bounds,crate::model::Dock::Top),"隐藏的顶栏不触发抬高");
             }
         }
     }

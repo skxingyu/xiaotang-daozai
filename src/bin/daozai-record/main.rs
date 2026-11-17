@@ -451,6 +451,7 @@ fn main() {
             bt: Vec::new(),
             bt_ready: true,
             screen: None,
+            bottom_bar: 0.0,
             backdrop: None,
             glass_blur: false,
             opaque_surface: false,

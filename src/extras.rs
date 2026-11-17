@@ -1493,9 +1493,12 @@ impl App {
                             settings_control_row_right(ui,"皮肤",|ui|{settings_segmented(ui,&mut self.settings.skin,&skins,64.0);});
                             settings_hint(ui,self.settings.skin.description());
                             ui.separator();
-                            let shapes:Vec<(model::IslandShape,&str)>=model::IslandShape::ALL.iter().map(|s|(*s,s.label())).collect();
-                            settings_control_row_right(ui,"形状",|ui|{settings_segmented(ui,&mut self.settings.island_shape,&shapes,64.0);});
-                            settings_hint(ui,self.settings.island_shape.description());
+                            let bottom=self.settings.dock.is_bottom();
+                            ui.add_enabled_ui(!bottom,|ui|{
+                                let shapes:Vec<(model::IslandShape,&str)>=model::IslandShape::ALL.iter().map(|s|(*s,s.label())).collect();
+                                settings_control_row_right(ui,"形状",|ui|{settings_segmented(ui,&mut self.settings.island_shape,&shapes,64.0);});
+                                settings_hint(ui,self.settings.island_shape.description());
+                            });
                             if self.settings.skin.is_glass() {
                                 ui.separator();
                                 let mut blur=self.settings.glass_blur;
@@ -1533,43 +1536,52 @@ impl App {
                             });
                             if self.settings.dock.is_side() {
                                 ui.label(egui::RichText::new("收起时竖向排列时间、电池、播放、专注和 AI 额度；展开面板从屏幕边缘滑出。吉祥物和岛上歌词只在顶部停靠时显示。").size(11.0).color(ui.visuals().weak_text_color()));
+                            } else if self.settings.dock.is_bottom() {
+                                ui.label(egui::RichText::new("收起时收成一条横向胶囊放在任务栏里，展开面板从下往上抬起、停在任务栏上沿；形状固定为胶囊。").size(11.0).color(ui.visuals().weak_text_color()));
                             }
                             ui.add_space(4.0);
-                            let side=self.settings.dock.is_side();
-                            settings_control_row(ui,if side{"上下位置"}else{"水平位置"},56.0,|ui|{
-                                ui.horizontal(|ui|{
-                                    let limit=crate::model::ISLAND_OFFSET_MAX;
-                                    let offset=&mut self.settings.island_offset;
-                                    let (less,more,less_tip,more_tip)=if side{("↑","↓","向上微调","向下微调")}else{("←","→","向左微调","向右微调")};
-                                    if ui.add_enabled(*offset>-limit,egui::Button::new(less).min_size(egui::vec2(26.0,22.0))).on_hover_text(less_tip).clicked(){*offset=(*offset-5).max(-limit);}
-                                    ui.spacing_mut().slider_width=150.0;
-                                    ui.add(egui::Slider::new(&mut *offset,-limit..=limit).show_value(false));
-                                    if ui.add_enabled(*offset<limit,egui::Button::new(more).min_size(egui::vec2(26.0,22.0))).on_hover_text(more_tip).clicked(){*offset=(*offset+5).min(limit);}
-                                    if ui.add_enabled(*offset!=0,egui::Button::new("恢复居中")).clicked(){*offset=0;}
-                                }).response
-                            });
-                            let offset=self.settings.island_offset;
-                            let (less,more)=if side{("偏上","偏下")}else{("偏左","偏右")};
-                            let position=match offset {0=>"居中".to_string(),o if o<0=>format!("{less} {}%",-o),o=>format!("{more} {o}%")};
-                            ui.label(egui::RichText::new(format!("当前：{position}。也可以展开后按住日期时间，拖到屏幕顶部、左侧或右侧；展开面板和通知始终留在屏幕内，换屏或调整大小后保持相对位置。")).size(11.0).color(ui.visuals().weak_text_color()));
+                            // 底部停靠固定贴在任务栏左侧，位移没有意义。
+                            if self.settings.dock.is_bottom() {
+                                ui.label(egui::RichText::new("底部停靠时岛体固定在任务栏左侧空位，不随水平位置移动；想换个位置可以把停靠拖回顶部或左右两侧。").size(11.0).color(ui.visuals().weak_text_color()));
+                            } else {
+                                    let side=self.settings.dock.is_side();
+                                    settings_control_row(ui,if side{"上下位置"}else{"水平位置"},56.0,|ui|{
+                                        ui.horizontal(|ui|{
+                                            let limit=crate::model::ISLAND_OFFSET_MAX;
+                                            let offset=&mut self.settings.island_offset;
+                                            let (less,more,less_tip,more_tip)=if side{("↑","↓","向上微调","向下微调")}else{("←","→","向左微调","向右微调")};
+                                            if ui.add_enabled(*offset>-limit,egui::Button::new(less).min_size(egui::vec2(26.0,22.0))).on_hover_text(less_tip).clicked(){*offset=(*offset-5).max(-limit);}
+                                            ui.spacing_mut().slider_width=150.0;
+                                            ui.add(egui::Slider::new(&mut *offset,-limit..=limit).show_value(false));
+                                            if ui.add_enabled(*offset<limit,egui::Button::new(more).min_size(egui::vec2(26.0,22.0))).on_hover_text(more_tip).clicked(){*offset=(*offset+5).min(limit);}
+                                            if ui.add_enabled(*offset!=0,egui::Button::new("恢复居中")).clicked(){*offset=0;}
+                                        }).response
+                                    });
+                                    let offset=self.settings.island_offset;
+                                    let (less,more)=if side{("偏上","偏下")}else{("偏左","偏右")};
+                                    let position=match offset {0=>"居中".to_string(),o if o<0=>format!("{less} {}%",-o),o=>format!("{more} {o}%")};
+                                    ui.label(egui::RichText::new(format!("当前：{position}。也可以展开后按住日期时间，拖到屏幕顶部、左侧、右侧或底部；展开面板和通知始终留在屏幕内，换屏或调整大小后保持相对位置。")).size(11.0).color(ui.visuals().weak_text_color()));
+                            }
                             ui.add_space(4.0);
                             setting_row(ui,"OLED 像素偏移","收起静止时让岛体沿屏幕边缘缓慢移动几个像素，帮助减轻 OLED 静态显示留下的痕迹；不会改动你保存的位置",&mut self.settings.oled_shift);
                             if self.settings.oled_shift {
-                                settings_hint(ui,"每 45 秒移动 1 像素、单方向最多 3 像素；顶部停靠左右移动，左右停靠上下移动。展开、点击或拖拽时保持当前位置，位置拉满或屏幕太窄时少挪或不挪。");
+                                settings_hint(ui,"每 45 秒移动 1 像素、单方向最多 3 像素；顶部或底部停靠左右移动，左右停靠上下移动。展开、点击或拖拽时保持当前位置，位置拉满或屏幕太窄时少挪或不挪。");
                             }
-                            ui.add_space(4.0);
-                            setting_row(ui,"顶栏适配","顶部有菜单栏类软件或任务栏时，选择岛体的显示方式",&mut self.settings.avoid_top_bar);
-                            if self.settings.avoid_top_bar {
-                                settings_control_row_right(ui,"显示方式",|ui|{
-                                    settings_segmented(ui,&mut self.settings.top_bar_on_top,&[(false,"避开顶栏"),(true,"岛仔置顶")],90.0);
-                                });
-                                if self.settings.top_bar_on_top {
-                                    settings_hint(ui,"顶部停靠时，岛体保持在屏幕顶边，显示在顶栏上方。");
-                                } else {
-                                    let reserved=crate::display_layout::selected(&self.displays,&self.settings.display_id).map_or(0,|d|{
-                                        let b=crate::display_layout::placement_bounds(d,true);(b.top-d.bounds.top).max(0)
+                            if !self.settings.dock.is_bottom() {
+                                ui.add_space(4.0);
+                                setting_row(ui,"顶栏适配","顶部有菜单栏类软件或任务栏时，选择岛体的显示方式",&mut self.settings.avoid_top_bar);
+                                if self.settings.avoid_top_bar {
+                                    settings_control_row_right(ui,"显示方式",|ui|{
+                                        settings_segmented(ui,&mut self.settings.top_bar_on_top,&[(false,"避开顶栏"),(true,"岛仔置顶")],90.0);
                                     });
-                                    settings_hint(ui,&if reserved>0 {format!("已检测到顶栏，岛体下移 {reserved} 像素。")}else{"未检测到顶栏；未向系统登记占用区域的顶栏可尝试“岛仔置顶”。".to_string()});
+                                    if self.settings.top_bar_on_top {
+                                        settings_hint(ui,"顶部停靠时，岛体保持在屏幕顶边，显示在顶栏上方。");
+                                    } else {
+                                        let reserved=crate::display_layout::selected(&self.displays,&self.settings.display_id).map_or(0,|d|{
+                                            let b=crate::display_layout::placement_bounds(d,true);(b.top-d.bounds.top).max(0)
+                                        });
+                                        settings_hint(ui,&if reserved>0 {format!("已检测到顶栏，岛体下移 {reserved} 像素。")}else{"未检测到顶栏；未向系统登记占用区域的顶栏可尝试“岛仔置顶”。".to_string()});
+                                    }
                                 }
                             }
                             ui.separator();

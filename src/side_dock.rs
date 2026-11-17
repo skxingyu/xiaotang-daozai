@@ -6,7 +6,7 @@
 //! 吉祥物和岛上歌词是横向内容，侧边停靠时不显示。
 
 use crate::app::{App, Env, Phase, BAR_H_MIN, BAR_W_MIN, PILL_GAP, PW};
-use crate::model::{Dock, IslandShape};
+use crate::model::Dock;
 use crate::paint::{self, Card, H};
 use crate::theme::{self, size, W};
 use eframe::egui::{Color32, Pos2, Rect, Vec2};
@@ -60,23 +60,37 @@ impl App {
     }
 
     fn side_gap(&self) -> f32 {
-        if self.settings.island_shape == IslandShape::Pill { PILL_GAP } else { 0.0 }
+        if self.settings.pill_shape() { PILL_GAP } else { 0.0 }
+    }
+
+    /// 底部停靠时岛体从画布下沿向上抬起的距离：收起时落在任务栏条内垂直居中，
+    /// 展开时贴着条的上沿，所以随展开进度从居中位置移到条顶。
+    pub(crate) fn bottom_lift(&self) -> f32 {
+        let bar = self.bottom_bar.max(0.0);
+        crate::anim::lerp(((bar - crate::app::BAR_H).max(0.0)) * 0.5, bar, self.progress())
+    }
+
+    /// 岛体的水平中心：顶部停靠居中，底部停靠贴着任务栏左侧空位。
+    pub(crate) fn island_cx(&self, win: Rect, w: f32) -> f32 {
+        if self.dock().is_bottom() { win.left() + crate::app::BOTTOM_LEFT_MARGIN + w / 2.0 } else { win.center().x }
     }
 
     /// 宽 `w`、高 `h` 的岛体在画布 `win` 里的位置：顶部停靠水平居中贴顶，
-    /// 左右停靠贴边、竖直居中。
+    /// 左右停靠贴边、竖直居中；底部停靠靠左、贴画布下沿向上抬起（见 `bottom_lift`）。
     pub(crate) fn island_rect(&self, win: Rect, w: f32, h: f32) -> Rect {
         let gap = self.side_gap();
+        let cx = self.island_cx(win, w);
         match self.dock() {
-            Dock::Top => Rect::from_min_size(Pos2::new(win.center().x - w / 2.0, win.top() + gap), Vec2::new(w, h)),
+            Dock::Top => Rect::from_min_size(Pos2::new(cx - w / 2.0, win.top() + gap), Vec2::new(w, h)),
+            Dock::Bottom => Rect::from_min_size(Pos2::new(cx - w / 2.0, win.bottom() - self.bottom_lift() - h), Vec2::new(w, h)),
             Dock::Left => Rect::from_min_size(Pos2::new(win.left() + gap, win.center().y - h / 2.0), Vec2::new(w, h)),
             Dock::Right => Rect::from_min_size(Pos2::new(win.right() - gap - w, win.center().y - h / 2.0), Vec2::new(w, h)),
         }
     }
 
-    /// 展开面板（页面内容）的左上角。
+    /// 展开面板（页面内容）的左上角。底部停靠跟着当前高度走，展开时面板从条上沿往上升。
     pub(crate) fn content_origin(&self, win: Rect) -> Pos2 {
-        self.island_rect(win, PW, self.expanded_height()).min
+        if self.dock().is_bottom() { self.island_rect(win, PW, self.h.pos.max(crate::app::BAR_H)).min } else { self.island_rect(win, PW, self.expanded_height()).min }
     }
 
     /// 侧边停靠的命中区域：收起时是胶囊外扩几点并一直延伸到屏幕边缘，展开时是整个面板。
@@ -91,6 +105,7 @@ impl App {
         match self.dock() {
             Dock::Left => Rect::from_min_max(Pos2::new(win.left(), rect.top()), rect.max),
             Dock::Right => Rect::from_min_max(rect.min, Pos2::new(win.right(), rect.bottom())),
+            Dock::Bottom => Rect::from_min_max(rect.min, Pos2::new(rect.right(), win.bottom())),
             Dock::Top => rect,
         }
     }
